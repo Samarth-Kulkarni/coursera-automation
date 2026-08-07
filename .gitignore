@@ -1,0 +1,14 @@
+# Sensitive user browser session & auth tokens
+coursera-profile/
+
+# Node modules & dependencies
+node_modules/
+
+# Generated presentations & binaries
+*.pptx
+generate_ppt.js
+
+# System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
