@@ -28,6 +28,54 @@ const NEXT_BUTTON_SELECTORS = [
   'a[data-e2e="item-navigation-next-button"]',
   'button[aria-label="Go to next item"]',
   'a[aria-label="Go to next item"]',
+  'button:has-text("Go to next item")',
+  'a:has-text("Go to next item")',
+  'button:has-text("Next item")',
+  'a:has-text("Next item")',
+  '[data-testid="next-item-button"]',
+  'button[aria-label*="next item" i]',
+  'a[aria-label*="next item" i]',
+];
+
+const POPUP_BUTTON_SELECTORS = [
+  'button:has-text("Start")',
+  'button:has-text("Skip")',
+  'button:has-text("Continue")',
+  'button:has-text("Resume")',
+  'button:has-text("Submit")',
+  'button:has-text("Next")',
+  'button:has-text("Got it")',
+  'button:has-text("OK")',
+  '[role="button"]:has-text("Start")',
+  '[role="button"]:has-text("Skip")',
+  '[role="button"]:has-text("Continue")',
+  '[role="button"]:has-text("Resume")',
+  '[role="button"]:has-text("Submit")',
+  '[role="button"]:has-text("Next")',
+  '[role="button"]:has-text("Got it")',
+  '[role="button"]:has-text("OK")',
+  'a:has-text("Start")',
+  'a:has-text("Skip")',
+  'a:has-text("Continue")',
+  'a:has-text("Resume")',
+  'a:has-text("Submit")',
+  'a:has-text("Next")',
+  'a:has-text("Got it")',
+  'button[aria-label*="Start" i]',
+  'button[aria-label*="Skip" i]',
+  'button[aria-label*="Continue" i]',
+  'button[aria-label*="Resume" i]',
+];
+
+const OPTION_SELECTORS = [
+  'input[type="radio"]',
+  'input[type="checkbox"]',
+  '[role="radio"]',
+  '[role="checkbox"]',
+  '.rc-Option',
+  '.rc-FormOption input',
+  'label:has(input[type="radio"])',
+  'label:has(input[type="checkbox"])',
 ];
 
 function ask(question) {
@@ -80,6 +128,52 @@ async function findMediaFrame(page, timeoutMs = 60000) {
   return null;
 }
 
+async function handleInVideoPopups(page, mediaFrame) {
+  try {
+    for (const f of page.frames()) {
+      // 1. Check if there's an option choice (e.g. multiple choice radio/checkbox) in popup that isn't selected yet
+      for (const optSel of OPTION_SELECTORS) {
+        try {
+          const optionEl = await f.$(optSel);
+          if (optionEl && await optionEl.isVisible()) {
+            const isChecked = await optionEl.isChecked().catch(() => false);
+            if (!isChecked) {
+              console.log('  In-video option detected. Selecting option...');
+              await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
+              await page.waitForTimeout(300);
+            }
+            break;
+          }
+        } catch {
+          // ignore per selector
+        }
+      }
+
+      // 2. Check for popup action buttons ("Start", "Skip", "Continue", "Resume", "Submit", etc.)
+      for (const btnSel of POPUP_BUTTON_SELECTORS) {
+        try {
+          const btn = await f.$(btnSel);
+          if (btn && await btn.isVisible()) {
+            const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
+            console.log(`  In-video popup detected ("${text || btnSel}"). Clicking button...`);
+            await btn.click({ timeout: 5000, force: true });
+            await page.waitForTimeout(1000);
+            if (mediaFrame) {
+              await startMediaPlayback(mediaFrame); // Ensure video resumes playing
+            }
+            return true; // Successfully handled a popup
+          }
+        } catch {
+          // ignore per selector
+        }
+      }
+    }
+  } catch (e) {
+    // Ignore errors if frames navigate during check
+  }
+  return false;
+}
+
 async function waitForVideoToEnd(page) {
   console.log('  Looking for a video/audio element (checking all frames)...');
   const frame = await findMediaFrame(page);
@@ -102,6 +196,7 @@ async function waitForVideoToEnd(page) {
 
   // Poll the media element's 'ended' property and actively check for in-video popups (e.g. quizzes)
   let isEnded = false;
+  let pollCount = 0;
   while (!isEnded) {
     try {
       isEnded = await frame.evaluate(() => {
@@ -118,21 +213,21 @@ async function waitForVideoToEnd(page) {
 
     if (isEnded) break;
 
-    // Check for "Skip" or "Continue" popup buttons
-    try {
-      const skipSelectors = 'button:has-text("Skip"), button:has-text("Continue to Video"), button:has-text("Continue"), [role="button"]:has-text("Skip"), [role="button"]:has-text("Continue")';
-      for (const f of page.frames()) {
-        const skipBtn = await f.$(skipSelectors);
-        if (skipBtn && await skipBtn.isVisible()) {
-          console.log('  In-video popup detected. Clicking skip/continue button...');
-          await skipBtn.click({ timeout: 5000, force: true });
-          await page.waitForTimeout(1000);
-          await startMediaPlayback(frame); // Ensure video resumes playing
-          break; // Break out of frame search and continue polling
-        }
+    // Check for in-video options and popup buttons ("Start", "Skip", "Continue", "Resume", "Submit", etc.)
+    await handleInVideoPopups(page, frame);
+
+    // Periodically ensure playback hasn't paused without a popup
+    pollCount++;
+    if (pollCount % 10 === 0) {
+      const isPaused = await frame.evaluate(() => {
+        const m = document.querySelector('video, audio');
+        return m ? m.paused : false;
+      }).catch(() => false);
+
+      if (isPaused) {
+        console.log('  Media appears paused — attempting to resume playback...');
+        await startMediaPlayback(frame);
       }
-    } catch (e) {
-      // Ignore errors if frame navigates during check
     }
 
     await page.waitForTimeout(1000);
@@ -161,7 +256,9 @@ async function startMediaPlayback(frame) {
   const playButtonSelectors = [
     'button[aria-label="Play"]',
     'button[title="Play"]',
+    'button[aria-label*="Play" i]',
     '.vjs-big-play-button',
+    '.rc-PlayButton',
     'video',
     'audio',
   ];
