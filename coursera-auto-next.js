@@ -37,13 +37,25 @@ const NEXT_BUTTON_SELECTORS = [
   'a[aria-label*="next item" i]',
 ];
 
-const POPUP_BUTTON_SELECTORS = [
+const MODAL_CONTAINER_SELECTORS = [
+  '[role="dialog"]',
+  '[aria-modal="true"]',
+  '.rc-Modal',
+  '.rc-InVideoPrompt',
+  '.rc-InVideoQuiz',
+  '.c-in-video-quiz',
+  '[data-testid*="modal" i]',
+  '[data-testid*="prompt" i]',
+  '.video-js .vjs-overlay',
+];
+
+const IN_VIDEO_BUTTON_SELECTORS = [
   'button:has-text("Start")',
   'button:has-text("Skip")',
+  'button:has-text("Continue to Video")',
   'button:has-text("Continue")',
   'button:has-text("Resume")',
   'button:has-text("Submit")',
-  'button:has-text("Next")',
   'button:has-text("Got it")',
   'button:has-text("OK")',
   '[role="button"]:has-text("Start")',
@@ -51,19 +63,13 @@ const POPUP_BUTTON_SELECTORS = [
   '[role="button"]:has-text("Continue")',
   '[role="button"]:has-text("Resume")',
   '[role="button"]:has-text("Submit")',
-  '[role="button"]:has-text("Next")',
   '[role="button"]:has-text("Got it")',
-  '[role="button"]:has-text("OK")',
   'a:has-text("Start")',
   'a:has-text("Skip")',
-  'a:has-text("Continue")',
+  'a:has-text("Continue to Video")',
   'a:has-text("Resume")',
-  'a:has-text("Submit")',
-  'a:has-text("Next")',
-  'a:has-text("Got it")',
   'button[aria-label*="Start" i]',
   'button[aria-label*="Skip" i]',
-  'button[aria-label*="Continue" i]',
   'button[aria-label*="Resume" i]',
 ];
 
@@ -130,46 +136,90 @@ async function findMediaFrame(page, timeoutMs = 60000) {
 
 async function handleInVideoPopups(page, mediaFrame) {
   try {
-    for (const f of page.frames()) {
-      // 1. Check if there's an option choice (e.g. multiple choice radio/checkbox) in popup that isn't selected yet
-      for (const optSel of OPTION_SELECTORS) {
-        try {
-          const optionEl = await f.$(optSel);
-          if (optionEl && await optionEl.isVisible()) {
-            const isChecked = await optionEl.isChecked().catch(() => false);
-            if (!isChecked) {
-              console.log('  In-video option detected. Selecting option...');
-              await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
-              await page.waitForTimeout(300);
+    const framesToCheck = page.frames();
+    for (const f of framesToCheck) {
+      const isMain = (f === page.mainFrame());
+      
+      // If on main frame, ONLY check inside explicit modal/dialog containers
+      // to avoid clicking main-page navigation buttons prematurely.
+      if (isMain) {
+        for (const modalSel of MODAL_CONTAINER_SELECTORS) {
+          try {
+            const modal = await f.$(modalSel);
+            if (modal && await modal.isVisible()) {
+              // 1. Check for option choices inside modal
+              for (const optSel of OPTION_SELECTORS) {
+                const optionEl = await modal.$(optSel);
+                if (optionEl && await optionEl.isVisible()) {
+                  const isChecked = await optionEl.isChecked().catch(() => false);
+                  if (!isChecked) {
+                    console.log('  In-video popup option detected. Selecting option...');
+                    await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
+                    await page.waitForTimeout(300);
+                  }
+                  break;
+                }
+              }
+              // 2. Check for action buttons inside modal
+              for (const btnSel of IN_VIDEO_BUTTON_SELECTORS) {
+                const btn = await modal.$(btnSel);
+                if (btn && await btn.isVisible()) {
+                  const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
+                  console.log(`  Modal popup detected ("${text || btnSel}"). Clicking button...`);
+                  await btn.click({ timeout: 5000, force: true });
+                  await page.waitForTimeout(1000);
+                  if (mediaFrame) {
+                    await startMediaPlayback(mediaFrame);
+                  }
+                  return true;
+                }
+              }
             }
-            break;
+          } catch {
+            // ignore per modal
           }
-        } catch {
-          // ignore per selector
         }
-      }
-
-      // 2. Check for popup action buttons ("Start", "Skip", "Continue", "Resume", "Submit", etc.)
-      for (const btnSel of POPUP_BUTTON_SELECTORS) {
-        try {
-          const btn = await f.$(btnSel);
-          if (btn && await btn.isVisible()) {
-            const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
-            console.log(`  In-video popup detected ("${text || btnSel}"). Clicking button...`);
-            await btn.click({ timeout: 5000, force: true });
-            await page.waitForTimeout(1000);
-            if (mediaFrame) {
-              await startMediaPlayback(mediaFrame); // Ensure video resumes playing
+      } else {
+        // Non-main frames (e.g. video player iframe)
+        // 1. Check for option choices
+        for (const optSel of OPTION_SELECTORS) {
+          try {
+            const optionEl = await f.$(optSel);
+            if (optionEl && await optionEl.isVisible()) {
+              const isChecked = await optionEl.isChecked().catch(() => false);
+              if (!isChecked) {
+                console.log('  In-video option detected. Selecting option...');
+                await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
+                await page.waitForTimeout(300);
+              }
+              break;
             }
-            return true; // Successfully handled a popup
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore per selector
+        }
+        // 2. Check for action buttons
+        for (const btnSel of IN_VIDEO_BUTTON_SELECTORS) {
+          try {
+            const btn = await f.$(btnSel);
+            if (btn && await btn.isVisible()) {
+              const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
+              console.log(`  In-video popup detected ("${text || btnSel}"). Clicking button...`);
+              await btn.click({ timeout: 5000, force: true });
+              await page.waitForTimeout(1000);
+              if (mediaFrame) {
+                await startMediaPlayback(mediaFrame);
+              }
+              return true;
+            }
+          } catch {
+            // ignore
+          }
         }
       }
     }
   } catch (e) {
-    // Ignore errors if frames navigate during check
+    // Ignore errors if frames navigate mid-check
   }
   return false;
 }
