@@ -22,6 +22,7 @@
 
 const { chromium } = require('playwright');
 const readline = require('readline');
+const { detectAndDismissAll, COURSE_URL_PATTERNS } = require('./popup-learner');
 
 const NEXT_BUTTON_SELECTORS = [
   'button[data-e2e="item-navigation-next-button"]',
@@ -37,52 +38,7 @@ const NEXT_BUTTON_SELECTORS = [
   'a[aria-label*="next item" i]',
 ];
 
-const MODAL_CONTAINER_SELECTORS = [
-  '[role="dialog"]',
-  '[aria-modal="true"]',
-  '.rc-Modal',
-  '.rc-InVideoPrompt',
-  '.rc-InVideoQuiz',
-  '.c-in-video-quiz',
-  '[data-testid*="modal" i]',
-  '[data-testid*="prompt" i]',
-  '.video-js .vjs-overlay',
-];
 
-const IN_VIDEO_BUTTON_SELECTORS = [
-  'button:has-text("Start")',
-  'button:has-text("Skip")',
-  'button:has-text("Continue to Video")',
-  'button:has-text("Continue")',
-  'button:has-text("Resume")',
-  'button:has-text("Submit")',
-  'button:has-text("Got it")',
-  'button:has-text("OK")',
-  '[role="button"]:has-text("Start")',
-  '[role="button"]:has-text("Skip")',
-  '[role="button"]:has-text("Continue")',
-  '[role="button"]:has-text("Resume")',
-  '[role="button"]:has-text("Submit")',
-  '[role="button"]:has-text("Got it")',
-  'a:has-text("Start")',
-  'a:has-text("Skip")',
-  'a:has-text("Continue to Video")',
-  'a:has-text("Resume")',
-  'button[aria-label*="Start" i]',
-  'button[aria-label*="Skip" i]',
-  'button[aria-label*="Resume" i]',
-];
-
-const OPTION_SELECTORS = [
-  'input[type="radio"]',
-  'input[type="checkbox"]',
-  '[role="radio"]',
-  '[role="checkbox"]',
-  '.rc-Option',
-  '.rc-FormOption input',
-  'label:has(input[type="radio"])',
-  'label:has(input[type="checkbox"])',
-];
 
 function ask(question) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -134,95 +90,7 @@ async function findMediaFrame(page, timeoutMs = 60000) {
   return null;
 }
 
-async function handleInVideoPopups(page, mediaFrame) {
-  try {
-    const framesToCheck = page.frames();
-    for (const f of framesToCheck) {
-      const isMain = (f === page.mainFrame());
-      
-      // If on main frame, ONLY check inside explicit modal/dialog containers
-      // to avoid clicking main-page navigation buttons prematurely.
-      if (isMain) {
-        for (const modalSel of MODAL_CONTAINER_SELECTORS) {
-          try {
-            const modal = await f.$(modalSel);
-            if (modal && await modal.isVisible()) {
-              // 1. Check for option choices inside modal
-              for (const optSel of OPTION_SELECTORS) {
-                const optionEl = await modal.$(optSel);
-                if (optionEl && await optionEl.isVisible()) {
-                  const isChecked = await optionEl.isChecked().catch(() => false);
-                  if (!isChecked) {
-                    console.log('  In-video popup option detected. Selecting option...');
-                    await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
-                    await page.waitForTimeout(300);
-                  }
-                  break;
-                }
-              }
-              // 2. Check for action buttons inside modal
-              for (const btnSel of IN_VIDEO_BUTTON_SELECTORS) {
-                const btn = await modal.$(btnSel);
-                if (btn && await btn.isVisible()) {
-                  const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
-                  console.log(`  Modal popup detected ("${text || btnSel}"). Clicking button...`);
-                  await btn.click({ timeout: 5000, force: true });
-                  await page.waitForTimeout(1000);
-                  if (mediaFrame) {
-                    await startMediaPlayback(mediaFrame);
-                  }
-                  return true;
-                }
-              }
-            }
-          } catch {
-            // ignore per modal
-          }
-        }
-      } else {
-        // Non-main frames (e.g. video player iframe)
-        // 1. Check for option choices
-        for (const optSel of OPTION_SELECTORS) {
-          try {
-            const optionEl = await f.$(optSel);
-            if (optionEl && await optionEl.isVisible()) {
-              const isChecked = await optionEl.isChecked().catch(() => false);
-              if (!isChecked) {
-                console.log('  In-video option detected. Selecting option...');
-                await optionEl.click({ timeout: 2000, force: true }).catch(() => {});
-                await page.waitForTimeout(300);
-              }
-              break;
-            }
-          } catch {
-            // ignore
-          }
-        }
-        // 2. Check for action buttons
-        for (const btnSel of IN_VIDEO_BUTTON_SELECTORS) {
-          try {
-            const btn = await f.$(btnSel);
-            if (btn && await btn.isVisible()) {
-              const text = (await btn.innerText().catch(() => '')).trim().replace(/\s+/g, ' ');
-              console.log(`  In-video popup detected ("${text || btnSel}"). Clicking button...`);
-              await btn.click({ timeout: 5000, force: true });
-              await page.waitForTimeout(1000);
-              if (mediaFrame) {
-                await startMediaPlayback(mediaFrame);
-              }
-              return true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-      }
-    }
-  } catch (e) {
-    // Ignore errors if frames navigate mid-check
-  }
-  return false;
-}
+
 
 async function waitForVideoToEnd(page) {
   console.log('  Looking for a video/audio element (checking all frames)...');
@@ -247,6 +115,7 @@ async function waitForVideoToEnd(page) {
   // Poll the media element's 'ended' property and actively check for in-video popups (e.g. quizzes)
   let isEnded = false;
   let pollCount = 0;
+  const lectureUrlForGuard = page.url(); // Save for redirect guard
   while (!isEnded) {
     try {
       isEnded = await frame.evaluate(() => {
@@ -263,8 +132,8 @@ async function waitForVideoToEnd(page) {
 
     if (isEnded) break;
 
-    // Check for in-video options and popup buttons ("Start", "Skip", "Continue", "Resume", "Submit", etc.)
-    await handleInVideoPopups(page, frame);
+    // Self-learning popup & redirect handler
+    await detectAndDismissAll(page, frame, lectureUrlForGuard);
 
     // Periodically ensure playback hasn't paused without a popup
     pollCount++;
@@ -378,14 +247,19 @@ async function waitForQuizToBeLeft(page, quizUrl) {
   await ask('Press Enter here once you are ready to start auto-advancing...\n');
 
   let moduleCount = 0;
+  let lastKnownLectureUrl = page.url();
 
   while (true) {
     const url = page.url();
+    lastKnownLectureUrl = url; // Track lecture URL for redirect guard
+
+    // Check for redirects before doing anything else
+    await detectAndDismissAll(page, null, lastKnownLectureUrl);
 
     // Assume it's a lecture item (or a test we want to skip) — wait for its video to end.
     await waitForVideoToEnd(page);
 
-    const nextBtn = await findNextButton(page);
+    let nextBtn = await findNextButton(page);
     if (!nextBtn) {
       console.log('No "Go to next item" button found — course or module appears finished.');
       break;
@@ -395,21 +269,47 @@ async function waitForQuizToBeLeft(page, quizUrl) {
     const oldUrl = page.url();
     
     let clicked = false;
-    while (!clicked) {
+    let clickRetries = 0;
+    const MAX_CLICK_RETRIES = 10;
+    while (!clicked && clickRetries < MAX_CLICK_RETRIES) {
       try {
         await nextBtn.click({ timeout: 5000, force: true });
         clicked = true;
       } catch (err) {
-        if (err.message.includes('intercepts pointer events') || err.name === 'TimeoutError') {
-          console.log('\n  >>> CLICK BLOCKED OR TIMED OUT <<<');
-          console.log('  A modal (like the Honor Code) might be blocking the "Go to next item" button.');
-          console.log('  Please accept or close any modals in the browser window.');
-          console.log('  Retrying click in 5 seconds...\n');
-          await page.waitForTimeout(5000);
+        const msg = err.message || '';
+        const isRecoverable = msg.includes('intercepts pointer events')
+          || msg.includes('not visible')
+          || msg.includes('not attached')
+          || msg.includes('detached')
+          || err.name === 'TimeoutError';
+
+        if (isRecoverable) {
+          clickRetries++;
+          console.log(`\n  >>> CLICK FAILED (attempt ${clickRetries}/${MAX_CLICK_RETRIES}) <<<`);
+          console.log(`  Reason: ${msg.split('\n')[0]}`);
+          console.log('  Attempting auto-dismiss of any blocking overlay...');
+          const handled = await detectAndDismissAll(page, null, lastKnownLectureUrl);
+          if (!handled) {
+            console.log('  No overlay found. Waiting before retry...');
+          }
+          await page.waitForTimeout(handled ? 1000 : 3000);
+
+          // Re-find the button — the old handle may be stale
+          nextBtn = await findNextButton(page);
+          if (!nextBtn) {
+            console.log('  "Go to next item" button disappeared. Skipping this cycle...');
+            break;
+          }
         } else {
           throw err;
         }
       }
+    }
+
+    if (!clicked) {
+      console.log('  Could not click "Go to next item" after retries. Moving on...');
+      await page.waitForTimeout(2000);
+      continue;
     }
 
     try {

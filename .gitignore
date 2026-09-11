@@ -1,6 +1,9 @@
 # Sensitive user browser session & auth tokens
 coursera-profile/
 
+# Learned popup dismissal data (machine-specific)
+popup-memory.json
+
 # Node modules & dependencies
 node_modules/
 
